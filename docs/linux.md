@@ -6,16 +6,25 @@ app también funciona; solo cambia el paso de las reglas de ventana.
 
 ## 1. Instalar los mods
 
-Igual que en macOS, en el prompt de Claude Code:
+Desde la shell, añade el marketplace (se llama `jos-mods`) e instala los mods
+que quieras:
 
+```sh
+claude plugin marketplace add Jos1704/claude-mods-jos
+claude plugin install usage-meters@jos-mods
+claude plugin install clawd-buddy@jos-mods
+claude plugin install guardian@jos-mods
+claude plugin install cambios@jos-mods
+claude plugin install bitacora@jos-mods
 ```
-/plugin install usage-meters --marketplace Jos1704/claude-mods-jos
-/plugin install clawd-buddy --marketplace Jos1704/claude-mods-jos
-```
+
+`claude plugin list` debe mostrarlos como `✔ enabled`. Las sesiones de Claude
+Code que ya estaban abiertas los cargan al reiniciarse.
 
 ## 2. Compilar e instalar la app
 
-Hace falta Rust. En Omarchy (Arch):
+Hace falta Rust. En Omarchy (Arch) sirve el paquete `rust` o `rustup`; si no
+tienes ninguno:
 
 ```sh
 sudo pacman -S --needed rustup base-devel
@@ -39,13 +48,68 @@ export PATH="$HOME/.cargo/bin:$PATH"
 ```
 
 No hace falta abrirla a mano: `clawd-buddy` la arranca al iniciar cada sesión de
-Claude Code si no está corriendo ya.
+Claude Code si no está corriendo ya (si `clawd-float` no está en el `PATH`, la
+busca en `~/.cargo/bin`).
 
 ## 3. Hacer que flote en Hyprland
 
 En Wayland una app no puede ponerse "siempre encima" ni elegir su posición: eso
 lo decide Hyprland con reglas de ventana. La ventana de Clawd se identifica con
 la clase `clawd`.
+
+Desde la 0.55, Hyprland se configura en Lua (`~/.config/hypr/hyprland.lua`) y
+es lo que usa Omarchy. Comprueba tu versión con `hyprctl version` y sigue el
+apartado que te toque.
+
+### Hyprland 0.55 o posterior (Lua, Omarchy actual)
+
+Añade al final de `~/.config/hypr/hyprland.lua`, después de los `require` de
+tus archivos:
+
+```lua
+-- Clawd (claude-mods-jos): flotante, en todos los workspaces, sin bordes ni sombra,
+-- en la esquina superior derecha (la ventana mide 240 px de ancho).
+o.window("^(clawd)$", {
+  tag = "-default-opacity",
+  float = true,
+  pin = true,
+  border_size = 0,
+  no_shadow = true,
+  no_blur = true,
+  no_initial_focus = true,
+  opacity = "1 1",
+  move = { "(monitor_w-264)", 48 },
+})
+```
+
+Recarga y comprueba que no haya errores (`hyprctl configerrors` no debe
+imprimir nada):
+
+```sh
+hyprctl reload
+hyprctl configerrors
+```
+
+| Regla | Para qué |
+| --- | --- |
+| `float` | Ventana flotante, fuera del tiling. |
+| `pin` | Visible en todos los workspaces, como "siempre encima". |
+| `border_size = 0`, `no_shadow`, `no_blur` | Sin el marco de Hyprland, para que el fondo transparente se vea limpio. |
+| `tag = "-default-opacity"`, `opacity = "1 1"` | Quita la opacidad que Omarchy pone por defecto a todas las ventanas. |
+| `no_initial_focus` | No te roba el foco al aparecer. |
+| `move = { "(monitor_w-264)", 48 }` | Esquina superior derecha. Cambia las expresiones para otra esquina (por ejemplo `"(monitor_h-218)"` para abajo; la ventana mide 170 px de alto). |
+
+`o.window` es un atajo de Omarchy. Sin Omarchy, usa la función de Hyprland
+directamente: `hl.window_rule({ match = { class = "^(clawd)$" }, float = true, ... })`.
+
+Para tenerlo abierto desde que inicias sesión, aunque no hayas abierto Claude
+Code, añade en `~/.config/hypr/autostart.lua`:
+
+```lua
+o.exec_on_start("clawd-float")
+```
+
+### Hyprland 0.48 a 0.54 (hyprlang)
 
 Añade al final de `~/.config/hypr/hyprland.conf`:
 
@@ -58,30 +122,15 @@ windowrule = noshadow, class:^(clawd)$
 windowrule = noblur, class:^(clawd)$
 windowrule = noinitialfocus, class:^(clawd)$
 windowrule = move 100%-264 48, class:^(clawd)$
-```
 
-Y recarga con `hyprctl reload`.
-
-| Regla | Para qué |
-| --- | --- |
-| `float` | Ventana flotante, fuera del tiling. |
-| `pin` | Visible en todos los workspaces, como "siempre encima". |
-| `noborder`, `noshadow`, `noblur` | Sin el marco de Hyprland, para que el fondo transparente se vea limpio. |
-| `noinitialfocus` | No te roba el foco al aparecer. |
-| `move 100%-264 48` | Esquina superior derecha (la ventana mide 240 px de ancho). Cambia los números para otra esquina. |
-
-> Hyprland ha cambiado la sintaxis de las reglas entre versiones (`windowrulev2`
-> en las antiguas, `windowrule` con la misma forma desde la 0.48). Si
-> `hyprctl reload` marca errores en estas líneas, revisa la página
-> [Window Rules](https://wiki.hypr.land/Configuring/Window-Rules/) de la wiki de
-> Hyprland para tu versión (`hyprctl version`).
-
-Para tenerlo abierto desde que inicias sesión, aunque no hayas abierto Claude
-Code, añade también:
-
-```ini
+# Opcional: abrirlo al iniciar sesión
 exec-once = clawd-float
 ```
+
+Y recarga con `hyprctl reload`. En versiones anteriores a la 0.48 la palabra es
+`windowrulev2`. Si algo marca error, revisa la página
+[Window Rules](https://wiki.hypr.land/Configuring/Basics/Window-Rules/) de la
+wiki de Hyprland para tu versión.
 
 ## 4. Uso
 
@@ -100,7 +149,7 @@ Es igual que en macOS (ver el [README](../README.md#uso)), con una diferencia:
 | Síntoma | Qué revisar |
 | --- | --- |
 | No aparece | Ejecuta `clawd-float` en una terminal para ver sus errores. Comprueba que haya sesiones en `ls ~/.claude/clawd/sessions/`: las sesiones de Claude Code abiertas antes de instalar el mod no aparecen hasta reiniciarlas. |
-| Aparece en mosaico, no flotando | Las reglas no se aplicaron: `hyprctl clients` debe mostrar `class: clawd`, y `hyprctl reload` no debe dar errores. |
+| Aparece en mosaico, no flotando | Las reglas no se aplicaron: `hyprctl clients` debe mostrar `class: clawd`, y `hyprctl configerrors` no debe dar errores. Si usas Hyprland 0.55+ con las reglas en `hyprland.conf`, no se leen: pásalas a `hyprland.lua`. |
 | Iconos como cuadritos | Falta una fuente con símbolos: `sudo pacman -S noto-fonts`. |
 | Lo ocultaste y no vuelve | Escribe `/clawd` en una sesión, o empieza cualquier tarea. |
 
