@@ -1,0 +1,16 @@
+{
+  "name": "jos-mods",
+  "owner": { "name": "Josué" },
+  "plugins": [
+    {
+      "name": "clawd-buddy",
+      "source": "./plugins/clawd-buddy",
+      "description": "Clawd flotante en tu escritorio: qué hace cada sesión de Claude Code, sus tareas y el modelo"
+    },
+    {
+      "name": "usage-meters",
+      "source": "./plugins/usage-meters",
+      "description": "Medidores de contexto, límite de 5 horas y límite semanal bajo la línea de modo"
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+{ "name": "clawd-buddy", "version": "0.1.0", "description": "Clawd flotante en tu escritorio: actividad, tareas y modelo de Claude Code", "types": "./types/index.d.ts" }

@@ -1,0 +1,1 @@
+{ "name": "usage-meters", "version": "0.1.0", "description": "Medidores de contexto, límite de 5 horas y límite semanal bajo la línea de modo", "types": "./types/index.d.ts" }
