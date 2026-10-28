@@ -1,0 +1,1 @@
+{ "name": "bitacora", "version": "0.1.0", "description": "Bitácora del día (/hoy) y consumo por proyecto (/costos), guardados en tu equipo", "types": "./types/index.d.ts" }

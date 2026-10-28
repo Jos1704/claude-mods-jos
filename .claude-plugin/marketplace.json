@@ -1,6 +1,8 @@
 {
   "name": "jos-mods",
-  "owner": { "name": "Josué" },
+  "owner": {
+    "name": "Josué"
+  },
   "plugins": [
     {
       "name": "clawd-buddy",
@@ -11,6 +13,21 @@
       "name": "usage-meters",
       "source": "./plugins/usage-meters",
       "description": "Medidores de contexto, límite de 5 horas y límite semanal bajo la línea de modo"
+    },
+    {
+      "name": "guardian",
+      "source": "./plugins/guardian",
+      "description": "Guardián de producción y escudo de secretos: pide permiso antes de comandos peligrosos y tapa las claves de .env"
+    },
+    {
+      "name": "cambios",
+      "source": "./plugins/cambios",
+      "description": "Panel con los archivos que Claude creó o editó en la sesión, sus líneas y el diff de cada uno"
+    },
+    {
+      "name": "bitacora",
+      "source": "./plugins/bitacora",
+      "description": "Bitácora del día (/hoy) y consumo por proyecto (/costos), guardados en tu equipo"
     }
   ]
 }
