@@ -1,0 +1,1 @@
+{ "name": "cambios", "version": "0.1.0", "description": "Panel con los archivos que Claude creó o editó en la sesión, sus líneas y el diff de cada uno", "types": "./types/index.d.ts" }

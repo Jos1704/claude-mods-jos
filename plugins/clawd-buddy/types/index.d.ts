@@ -16,6 +16,9 @@ export type Task = { id: string; subject: string; activeForm: string; status: 'p
 
 export type Counts = { read: number; write: number; edit: number; run: number }
 
+/** How Clawd feels about the last thing that happened: tests passed, or something failed. */
+export type Mood = { kind: 'happy' | 'worried' | ''; at: number; detail: string }
+
 export type Work = {
   isWorking: boolean
   workStartedAt: number
@@ -24,6 +27,12 @@ export type Work = {
   tasks: Task[]
   counts: Counts
   model: string
+  /** What the session waits on the person for (a permission, a question); '' when nothing. */
+  waiting: string
+  waitingSince: number
+  mood: Mood
+  /** How full the context window is, 0 to 100. */
+  contextPercent: number
 }
 
 export type Host = {

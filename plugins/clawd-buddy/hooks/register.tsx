@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Activity, ActivityKind, Counts, Host, Task, Work } from '../types'
+import type { Activity, ActivityKind, Counts, Host, Mood, Task, Work } from '../types'
 
 // The floating Clawd app (~/mods/clawd-float) draws this session from the
 // file this mod keeps at ~/.claude/clawd/sessions/<session id>.json.
@@ -16,6 +16,19 @@ const IDLE: Work = {
   tasks: [],
   counts: { read: 0, write: 0, edit: 0, run: 0 },
   model: '',
+  waiting: '',
+  waitingSince: 0,
+  mood: { kind: '', at: 0, detail: '' },
+  contextPercent: 0,
+}
+
+const TEST_COMMAND =
+  /\b(?:artisan\s+test|phpunit|pest|vendor\/bin\/(?:phpunit|pest)|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test|vitest|jest|pytest|cargo\s+test|go\s+test)\b/
+
+// Tools that stop for the person by their nature, and what Clawd says meanwhile.
+const ASKS_THE_PERSON: Record<string, string> = {
+  AskUserQuestion: 'Tiene una pregunta para ti',
+  ExitPlanMode: 'Quiere que apruebes el plan',
 }
 
 const work = atom({ plugin: 'clawd-buddy', key: 'work' } as const, IDLE)
@@ -121,6 +134,14 @@ function applyTasks(tasks: Task[], tool: string, args: Record<string, unknown>, 
   return tasks
 }
 
+/** What a finished tool call says about Clawd's mood, if anything. */
+function moodAfter(tool: string, args: Record<string, unknown>, isError: boolean, now: number): Mood | null {
+  const isTest = tool === 'Bash' && TEST_COMMAND.test(String(args.command ?? ''))
+  if (isTest) return { kind: isError ? 'worried' : 'happy', at: now, detail: isError ? 'Fallaron los tests' : '¡Tests en verde!' }
+  if (isError) return { kind: 'worried', at: now, detail: `Falló ${tool}` }
+  return null
+}
+
 /** Writes this session's state where the app reads it. */
 async function publish($: EngineInterface, isEnded = false) {
   const h = await read($, host)
@@ -215,21 +236,48 @@ export const register: Register = on => {
       isWorking: true,
       workStartedAt: now,
       tasks: w.tasks.some(t => t.status !== 'completed') ? w.tasks : [],
+      contextPercent: w.contextPercent ?? 0,
       model,
     }))
     await publish($)
     return next(e)
   })
 
+  on('tool.check', async ($, e, next) => {
+    const verdict = await next(e)
+    if (verdict.decision === 'ask' && e.tool_use_id !== undefined && e.approver === 'person') {
+      const now = await $.clock.now()
+      await update($, work, w => ({ ...w, waiting: `Necesita tu permiso: ${e.tool}`, waitingSince: now }))
+      await publish($)
+    }
+    return verdict
+  }).catch(($, e, next) => next(e))
+
   on('tool.call', async ($, e, next) => {
-    if (e.agentId !== undefined) return next(e)
+    if (e.agentId !== undefined) {
+      // A subagent's call may still have stopped for a permission: clear it once answered.
+      const result = await next(e)
+      if ((await read($, work)).waiting !== '') {
+        await update($, work, w => ({ ...w, waiting: '' }))
+        await publish($)
+      }
+      return result
+    }
     const tool: string = e.tool
     const args = e as unknown as Record<string, unknown>
     const activity = activityFor(tool, args)
-    await update($, work, w => ({ ...w, activity, counts: bump(w.counts, activity.kind) }))
+    const asks = ASKS_THE_PERSON[tool]
+    const startedAt = await $.clock.now()
+    await update($, work, w => ({
+      ...w,
+      activity,
+      counts: bump(w.counts, activity.kind),
+      ...(asks ? { waiting: asks, waitingSince: startedAt } : {}),
+    }))
     await publish($)
 
     const result = await next(e)
+    const mood = moodAfter(tool, args, result.isError === true, await $.clock.now())
 
     const newId = tool === 'TaskCreate' ? (/#(\d+)/.exec(JSON.stringify(result))?.[1] ?? null) : null
     // Once a tool is done the model is thinking again, until the next one.
@@ -237,6 +285,9 @@ export const register: Register = on => {
       ...w,
       activity: w.activity.kind === activity.kind && w.activity.detail === activity.detail ? THINKING : w.activity,
       tasks: activity.kind === 'tasks' ? applyTasks(w.tasks, tool, args, newId) : w.tasks,
+      // Answered: the permission or the question is behind us.
+      waiting: '',
+      mood: mood ?? w.mood,
     }))
     await publish($)
     return result
@@ -244,10 +295,19 @@ export const register: Register = on => {
     // Clawd must never stand in a tool's way.
     .catch(($, e, next) => next(e))
 
+  on('session.measure', async ($, e, next) => {
+    const percent = Math.round(e.context.percent ?? 0)
+    if (percent !== (await read($, work)).contextPercent) {
+      await update($, work, w => ({ ...w, contextPercent: percent }))
+      await publish($)
+    }
+    return next(e)
+  })
+
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
       const now = await $.clock.now()
-      await update($, work, w => ({ ...w, isWorking: false, finishedAt: now, activity: THINKING }))
+      await update($, work, w => ({ ...w, isWorking: false, finishedAt: now, activity: THINKING, waiting: '' }))
       await publish($)
     }
     return next(e)

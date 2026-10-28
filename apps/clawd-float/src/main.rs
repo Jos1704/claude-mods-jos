@@ -2,6 +2,7 @@
 // está haciendo. Lee los archivos que el mod `clawd-buddy` escribe en
 // ~/.claude/clawd/sessions/<id>.json, uno por sesión.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -27,6 +28,16 @@ const GREEN: Color32 = Color32::from_rgb(0x6C, 0xC0, 0x8B);
 const HOVER: Color32 = Color32::from_rgba_premultiplied(40, 38, 36, 120);
 /// Cuánto sigue en la lista una sesión que terminó.
 const FINISHED_FOR_MS: f64 = 10_000.0;
+/// Cuánto le dura a Clawd la alegría o la preocupación.
+const MOOD_MS: f64 = 6_000.0;
+/// Solo suena al terminar una tarea que tardó al menos esto.
+const LONG_TASK_MS: f64 = 15_000.0;
+/// Desde aquí Clawd suda por el contexto, y desde la segunda suda a mares.
+const SWEAT_AT: f64 = 75.0;
+const SWEAT_HARD_AT: f64 = 90.0;
+const AMBER: Color32 = Color32::from_rgb(0xE5, 0xB0, 0x4B);
+const RED: Color32 = Color32::from_rgb(0xE0, 0x6C, 0x6C);
+const BLUE: Color32 = Color32::from_rgb(0x7E, 0xB6, 0xF2);
 const MAX_LISTED: usize = 5;
 const DIM: Color32 = Color32::from_rgb(0x9A, 0x96, 0x90);
 
@@ -59,6 +70,18 @@ struct Session {
     updated_at: f64,
     work_started_at: f64,
     finished_at: f64,
+    waiting: String,
+    waiting_since: f64,
+    mood: Mood,
+    context_percent: f64,
+}
+
+#[derive(Deserialize, Clone, Default)]
+#[serde(default)]
+struct Mood {
+    kind: String,
+    at: f64,
+    detail: String,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -102,13 +125,14 @@ enum IdleMode {
 #[serde(default)]
 struct Settings {
     idle: IdleMode,
+    sound: bool,
     x: Option<f32>,
     y: Option<f32>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { idle: IdleMode::Sleep, x: None, y: None }
+        Settings { idle: IdleMode::Sleep, sound: false, x: None, y: None }
     }
 }
 
@@ -257,6 +281,40 @@ fn draw_clawd(painter: &egui::Painter, origin: Pos2, rows: [&str; 3], color: Col
                     color,
                 );
             }
+        }
+    }
+}
+
+/// Lo que Clawd siente, dibujado encima de él: una burbuja si te llama o se
+/// preocupa, brillitos si está contento, gotas si el contexto se llena.
+fn draw_feelings(painter: &egui::Painter, t: f32, origin: Pos2, art: Vec2, is_calling: bool, mood: Option<&str>, context: f64) {
+    let bubble = |mark: &str, color: Color32| {
+        let pulse = 1.0 + (t * 6.0).sin() * 0.08;
+        let center = Pos2::new(origin.x + art.x - PIXEL.x, origin.y - 8.0);
+        painter.circle_filled(center, 9.0 * pulse, color);
+        painter.text(center, Align2::CENTER_CENTER, mark, FontId::proportional(13.0), Color32::from_rgb(0x1A, 0x18, 0x16));
+    };
+    if is_calling {
+        bubble("?", AMBER);
+    } else if mood == Some("worried") {
+        bubble("!", RED);
+    } else if mood == Some("happy") {
+        let center = origin + art / 2.0;
+        for i in 0..4 {
+            let angle = t * 2.5 + i as f32 * std::f32::consts::FRAC_PI_2;
+            let pos = center + Vec2::new(angle.cos() * (art.x / 2.0 + 14.0), angle.sin() * (art.y / 2.0 + 6.0));
+            let alpha = (((t * 5.0 + i as f32).sin() * 0.5 + 0.5) * 255.0) as u8;
+            painter.text(pos, Align2::CENTER_CENTER, "✦", FontId::proportional(12.0), Color32::from_rgba_unmultiplied(0x6C, 0xC0, 0x8B, alpha));
+        }
+    }
+    if context >= SWEAT_AT {
+        let (drops, speed) = if context >= SWEAT_HARD_AT { (4, 1.4) } else { (2, 0.8) };
+        for i in 0..drops {
+            let phase = (t * speed + i as f32 / drops as f32).fract();
+            let side = if i % 2 == 0 { origin.x + 2.0 * PIXEL.x } else { origin.x + art.x - 2.0 * PIXEL.x };
+            let pos = Pos2::new(side + if i % 2 == 0 { -phase * 6.0 } else { phase * 6.0 }, origin.y + PIXEL.y * 0.5 + phase * 18.0);
+            let alpha = ((1.0 - phase) * 255.0) as u8;
+            painter.circle_filled(pos, 2.6, Color32::from_rgba_unmultiplied(0x7E, 0xB6, 0xF2, alpha));
         }
     }
 }
@@ -459,6 +517,30 @@ fn focus_hyprland(session: &Session) {
     }
 }
 
+// ---------------------------------------------------------------- sonidos
+
+enum Chime {
+    /// Terminó una tarea larga.
+    Done,
+    /// Necesita tu permiso o tiene una pregunta.
+    Attention,
+}
+
+fn play(chime: Chime) {
+    let (mac, linux) = match chime {
+        Chime::Done => ("/System/Library/Sounds/Glass.aiff", "complete"),
+        Chime::Attention => ("/System/Library/Sounds/Ping.aiff", "message-new-instant"),
+    };
+    if cfg!(target_os = "macos") {
+        let _ = Command::new("afplay").arg(mac).spawn();
+    } else {
+        let file = format!("/usr/share/sounds/freedesktop/stereo/{linux}.oga");
+        if Command::new("paplay").arg(&file).spawn().is_err() {
+            let _ = Command::new("canberra-gtk-play").args(["-i", linux]).spawn();
+        }
+    }
+}
+
 // ---------------------------------------------------------------- app
 
 struct Clawd {
@@ -473,6 +555,8 @@ struct Clawd {
     is_passthrough: bool,
     last_pos: Option<Pos2>,
     height: f32,
+    /// Por sesión, el último fin y la última espera ya anunciados con sonido.
+    heard: HashMap<String, (f64, f64)>,
 }
 
 impl Clawd {
@@ -491,6 +575,7 @@ impl Clawd {
             is_passthrough: false,
             last_pos: None,
             height: WINDOW.y,
+            heard: HashMap::new(),
             paths,
             settings,
         }
@@ -502,6 +587,19 @@ impl Clawd {
         if started > self.last_work_started {
             self.last_work_started = started;
             self.is_dismissed = false;
+        }
+        for s in &sessions {
+            let now = (s.finished_at, s.waiting_since);
+            if let Some(&(finished, waiting)) = self.heard.get(&s.session_id) {
+                if self.settings.sound {
+                    if s.finished_at > finished && s.finished_at - s.work_started_at >= LONG_TASK_MS {
+                        play(Chime::Done);
+                    } else if s.waiting_since > waiting && !s.waiting.is_empty() {
+                        play(Chime::Attention);
+                    }
+                }
+            }
+            self.heard.insert(s.session_id.clone(), now);
         }
         let control: Control = read_json(&self.paths.control);
         if control.show_at > self.last_show_at {
@@ -608,7 +706,18 @@ impl Clawd {
         let painter = ui.painter().clone();
         let listed = listed(&self.sessions, now);
         let shown: Vec<&Session> = listed.iter().take(MAX_LISTED).collect();
-        let featured = listed.iter().find(|s| s.is_working);
+        let waiting = listed
+            .iter()
+            .filter(|s| !s.waiting.is_empty())
+            .max_by(|a, b| a.waiting_since.partial_cmp(&b.waiting_since).unwrap_or(std::cmp::Ordering::Equal));
+        let featured = waiting.or(listed.iter().find(|s| s.is_working));
+        let mood = self
+            .sessions
+            .iter()
+            .filter(|s| !s.mood.kind.is_empty() && now - s.mood.at < MOOD_MS)
+            .max_by(|a, b| a.mood.at.partial_cmp(&b.mood.at).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|s| s.mood.kind.as_str());
+        let context = featured.or(latest(&self.sessions)).map(|s| s.context_percent).unwrap_or(0.0);
 
         // Toda la ventana se arrastra; un clic lleva a la sesión de Clawd.
         let area = ui.interact(full, ui.scope_id().with("clawd"), Sense::click_and_drag());
@@ -638,6 +747,17 @@ impl Clawd {
         let is_blinking = (t % 4.0) < 0.15;
         let rows: [&str; 3] = if is_asleep {
             [HEAD_BLINK, BODY, LEGS[0]]
+        } else if waiting.is_some() {
+            // Te llama: saluda con los brazos.
+            origin.y -= (t * 3.0).sin().abs() * 3.0;
+            let arms = ((t / 0.25) as usize) % 2 == 0;
+            [HEAD, if arms { BODY_ARMS } else { BODY }, LEGS[0]]
+        } else if mood == Some("happy") {
+            origin.y -= (t * 7.0).sin().abs() * 14.0;
+            [HEAD, BODY_ARMS, LEGS[((t / 0.15) as usize) % 2]]
+        } else if mood == Some("worried") {
+            origin.x += (t * 40.0).sin() * 2.5;
+            [HEAD, BODY, LEGS[0]]
         } else if is_done {
             // Terminó: brazos arriba, contento.
             [if is_blinking { HEAD_BLINK } else { HEAD }, BODY_ARMS, LEGS[0]]
@@ -667,7 +787,7 @@ impl Clawd {
             }
         } else if is_done {
             painter.text(prop_at, Align2::LEFT_CENTER, "✓", FontId::proportional(16.0), GREEN);
-        } else {
+        } else if waiting.is_none() && mood.is_none() {
             let prop = l.props[((t / 0.3) as usize) % l.props.len()];
             painter.text(prop_at, Align2::LEFT_CENTER, prop, FontId::proportional(16.0), l.color);
         }
@@ -699,7 +819,9 @@ impl Clawd {
         if more > 0 {
             body_h += line_h(&small);
         }
-        let card_h = pad + body_h + 8.0 + line_h(&tiny) + pad - gap;
+        // Al pasar el mouse el pie crece a dos filas de controles.
+        let footer_rows = if is_hovered { 2.0 } else { 1.0 };
+        let card_h = pad + body_h + 8.0 + line_h(&tiny) * footer_rows + pad - gap;
         let card = Rect::from_min_size(Pos2::new(full.left() + 4.0, card_top), Vec2::new(full.width() - 8.0, card_h));
 
         // La ventana se ajusta a la tarjeta.
@@ -711,6 +833,9 @@ impl Clawd {
 
         painter.rect(card, CornerRadius::same(12), CARD, Stroke::new(1.0, BORDER), StrokeKind::Inside);
         draw_clawd(&painter, origin, rows, CLAUDE);
+        if !is_asleep {
+            draw_feelings(&painter, t, origin, art, waiting.is_some(), mood, context);
+        }
 
         // ---- una fila por sesión
         let width = card.width() - pad * 2.0;
@@ -740,14 +865,29 @@ impl Clawd {
             let sl = look(if s.is_working { &s.activity.kind } else { "" });
             // Fila 1: proyecto y de dónde viene.
             let origin_label = source(s);
-            let origin_w = painter.layout_no_wrap(origin_label.to_owned(), tiny.clone(), DIM).size().x;
+            let mut origin_w = painter.layout_no_wrap(origin_label.to_owned(), tiny.clone(), DIM).size().x;
             painter.text(Pos2::new(card.right() - pad, y + 1.5), Align2::RIGHT_TOP, origin_label, tiny.clone(), DIM);
+            if s.context_percent >= SWEAT_AT {
+                let ctx = format!("ctx {:.0}%", s.context_percent);
+                let color = if s.context_percent >= SWEAT_HARD_AT { RED } else { BLUE };
+                let at = Pos2::new(card.right() - pad - origin_w - 6.0, y + 1.5);
+                origin_w += 6.0 + painter.layout_no_wrap(ctx.clone(), tiny.clone(), color).size().x;
+                painter.text(at, Align2::RIGHT_TOP, ctx, tiny.clone(), color);
+            }
             let title = fit(&painter, project(&s.cwd), &name, width - origin_w - 8.0);
             painter.text(Pos2::new(x, y), Align2::LEFT_TOP, title, name.clone(), TEXT);
             y += line_h(&name);
 
-            // Fila 2: qué hace, o que ya terminó.
-            if s.is_working {
+            // Fila 2: si te espera, cómo le fue, qué hace, o que ya terminó.
+            let is_moody = !s.mood.kind.is_empty() && now - s.mood.at < MOOD_MS && s.activity.kind == "thinking";
+            if !s.waiting.is_empty() {
+                let text = format!("? {}", s.waiting);
+                painter.text(Pos2::new(x, y), Align2::LEFT_TOP, fit(&painter, &text, &small, width), small.clone(), AMBER);
+            } else if is_moody {
+                let (mark, color) = if s.mood.kind == "happy" { ("✦", GREEN) } else { ("!", RED) };
+                let text = format!("{mark} {}", s.mood.detail);
+                painter.text(Pos2::new(x, y), Align2::LEFT_TOP, fit(&painter, &text, &small, width), small.clone(), color);
+            } else if s.is_working {
                 let verb = format!("{} {}", sl.icon, sl.verb);
                 let verb_w = painter.layout_no_wrap(verb.clone(), small.clone(), sl.color).size().x;
                 painter.text(Pos2::new(x, y), Align2::LEFT_TOP, &verb, small.clone(), sl.color);
@@ -796,12 +936,19 @@ impl Clawd {
                 IdleMode::Hide => "○ al terminar: ocultar",
             };
             let link = |text: &str| egui::Button::new(egui::RichText::new(text).size(11.5).color(TEXT)).frame(false);
-            let toggle = ui.put(Rect::from_min_max(Pos2::new(x - 2.0, foot_y - 16.0), Pos2::new(x + 150.0, foot_y + 2.0)), link(idle_label));
+            let first_y = foot_y - line_h(&tiny);
+            let toggle = ui.put(Rect::from_min_max(Pos2::new(x - 2.0, first_y - 16.0), Pos2::new(x + 150.0, first_y + 2.0)), link(idle_label));
             if toggle.clicked() {
                 self.settings.idle = match self.settings.idle {
                     IdleMode::Sleep => IdleMode::Hide,
                     IdleMode::Hide => IdleMode::Sleep,
                 };
+                self.save_settings();
+            }
+            let sound_label = if self.settings.sound { "♪ sonido: sí" } else { "♪ sonido: no" };
+            let sound = ui.put(Rect::from_min_max(Pos2::new(x - 2.0, foot_y - 16.0), Pos2::new(x + 100.0, foot_y + 2.0)), link(sound_label));
+            if sound.clicked() {
+                self.settings.sound = !self.settings.sound;
                 self.save_settings();
             }
             let hide = ui.put(Rect::from_min_max(Pos2::new(card.right() - pad - 64.0, foot_y - 16.0), Pos2::new(card.right() - pad + 2.0, foot_y + 2.0)), link("× ocultar"));

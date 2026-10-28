@@ -1,0 +1,1 @@
+{ "name": "guardian", "version": "0.1.0", "description": "Guardián de producción y escudo de secretos: pide permiso antes de comandos peligrosos y tapa las claves de .env" }
