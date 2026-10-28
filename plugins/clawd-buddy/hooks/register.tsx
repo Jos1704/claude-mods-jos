@@ -163,8 +163,17 @@ async function describeHost($: EngineInterface): Promise<Host> {
   }
 }
 
+// On Linux the app is the `clawd-float` binary `cargo install` put on the PATH
+// (or in ~/.cargo/bin); started once, detached from this session.
+const START_ON_LINUX =
+  'pgrep -x clawd-float >/dev/null && exit 0; ' +
+  'bin=$(command -v clawd-float || echo "$HOME/.cargo/bin/clawd-float"); ' +
+  '[ -x "$bin" ] && (setsid "$bin" >/dev/null 2>&1 &)'
+
 async function showApp($: EngineInterface) {
-  await $.process.run(['open', '-g', '-a', APP]).catch(() => undefined)
+  const system = await $.process.run(['uname']).catch(() => null)
+  const argv = system?.stdout.trim() === 'Darwin' ? ['open', '-g', '-a', APP] : ['sh', '-c', START_ON_LINUX]
+  await $.process.run(argv).catch(() => undefined)
 }
 
 export const register: Register = on => {

@@ -377,6 +377,10 @@ fn source(s: &Session) -> &str {
 /// Trae al frente la app de la sesión: en iTerm2 y Terminal su pestaña exacta,
 /// en VS Code la ventana de su carpeta.
 fn focus(session: &Session) {
+    if cfg!(target_os = "linux") {
+        focus_hyprland(session);
+        return;
+    }
     if !cfg!(target_os = "macos") {
         return;
     }
@@ -422,6 +426,35 @@ fn focus(session: &Session) {
         }
         _ => {
             let _ = Command::new("open").arg("-a").arg(app_name(&session.term_program)).spawn();
+        }
+    }
+}
+
+/// El proceso padre de `pid`, leído de /proc (Linux).
+fn parent_pid(pid: i32) -> Option<i32> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // «pid (nombre) estado ppid …»: el nombre puede llevar espacios, se salta hasta el último «)».
+    stat[stat.rfind(')')? + 1..].split_whitespace().nth(1)?.parse().ok()
+}
+
+/// En Hyprland: sube de la sesión a sus procesos padre hasta dar con la ventana
+/// de la terminal que la contiene, y la enfoca (cambiando de workspace si hace falta).
+fn focus_hyprland(session: &Session) {
+    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() {
+        return;
+    }
+    let Ok(out) = Command::new("hyprctl").args(["clients", "-j"]).output() else { return };
+    let Ok(clients) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) else { return };
+    let windows: Vec<i64> = clients.iter().filter_map(|c| c["pid"].as_i64()).collect();
+    let mut pid = session.pid;
+    for _ in 0..32 {
+        if windows.contains(&(pid as i64)) {
+            let _ = Command::new("hyprctl").args(["dispatch", "focuswindow", &format!("pid:{pid}")]).spawn();
+            return;
+        }
+        match parent_pid(pid) {
+            Some(parent) if parent > 1 => pid = parent,
+            _ => return,
         }
     }
 }
@@ -513,6 +546,8 @@ fn install_fonts(ctx: &egui::Context) {
         "/usr/share/fonts/TTF/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSansSymbols-Regular.ttf",
+        "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
     ];
     let mut fonts = FontDefinitions::default();
     for path in candidates {
@@ -791,6 +826,8 @@ fn main() -> eframe::Result {
     let settings: Settings = read_json(&Paths::new().settings);
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Clawd")
+        // La «class» de la ventana en Linux: con ella las reglas de Hyprland la reconocen.
+        .with_app_id("clawd")
         .with_inner_size(WINDOW)
         .with_decorations(false)
         .with_transparent(true)
