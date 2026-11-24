@@ -495,6 +495,53 @@ fn parent_pid(pid: i32) -> Option<i32> {
     stat[stat.rfind(')')? + 1..].split_whitespace().nth(1)?.parse().ok()
 }
 
+/// Despacha una acción en Hyprland: desde la 0.55 con una expresión Lua; si esa
+/// versión no la entiende, con la sintaxis clásica.
+fn hyprctl_dispatch(lua: &str, legacy: &[&str]) {
+    let ok = Command::new("hyprctl")
+        .args(["dispatch", lua])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "ok");
+    if !ok {
+        let _ = Command::new("hyprctl").arg("dispatch").args(legacy).output();
+    }
+}
+
+/// En Hyprland la ventana no puede cambiar de tamaño por su cuenta: Hyprland le
+/// dicta uno fijo. Este hilo le pide a Hyprland el alto que necesita la tarjeta
+/// y la devuelve a su sitio, porque Hyprland redimensiona desde el centro.
+/// Si llegan varios altos seguidos, solo aplica el último.
+fn hyprland_resizer() -> Option<std::sync::mpsc::Sender<f32>> {
+    std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")?;
+    let (tx, rx) = std::sync::mpsc::channel::<f32>();
+    std::thread::spawn(move || {
+        let pid = std::process::id() as i64;
+        while let Ok(mut height) = rx.recv() {
+            while let Ok(newer) = rx.try_recv() {
+                height = newer;
+            }
+            let Ok(out) = Command::new("hyprctl").args(["clients", "-j"]).output() else { continue };
+            let Ok(clients) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) else { continue };
+            let Some(me) = clients.iter().find(|c| c["pid"].as_i64() == Some(pid)) else { continue };
+            let (Some(x), Some(y)) = (me["at"][0].as_i64(), me["at"][1].as_i64()) else { continue };
+            if me["size"][1].as_f64() == Some(height.round() as f64) {
+                continue;
+            }
+            let (w, h) = (WINDOW.x as i64, height.round() as i64);
+            let window = format!("pid:{pid}");
+            hyprctl_dispatch(
+                &format!(r#"hl.dsp.window.resize({{ x = {w}, y = {h}, relative = false, window = "{window}" }})"#),
+                &["resizewindowpixel", &format!("exact {w} {h},{window}")],
+            );
+            hyprctl_dispatch(
+                &format!(r#"hl.dsp.window.move({{ x = {x}, y = {y}, relative = false, window = "{window}" }})"#),
+                &["movewindowpixel", &format!("exact {x} {y},{window}")],
+            );
+        }
+    });
+    Some(tx)
+}
+
 /// En Hyprland: sube de la sesión a sus procesos padre hasta dar con la ventana
 /// de la terminal que la contiene, y la enfoca (cambiando de workspace si hace falta).
 fn focus_hyprland(session: &Session) {
@@ -507,7 +554,7 @@ fn focus_hyprland(session: &Session) {
     let mut pid = session.pid;
     for _ in 0..32 {
         if windows.contains(&(pid as i64)) {
-            let _ = Command::new("hyprctl").args(["dispatch", "focuswindow", &format!("pid:{pid}")]).spawn();
+            hyprctl_dispatch(&format!(r#"hl.dsp.focus({{ window = "pid:{pid}" }})"#), &["focuswindow", &format!("pid:{pid}")]);
             return;
         }
         match parent_pid(pid) {
@@ -555,6 +602,8 @@ struct Clawd {
     is_passthrough: bool,
     last_pos: Option<Pos2>,
     height: f32,
+    /// En Hyprland, a quién pedirle el nuevo alto de la ventana.
+    resizer: Option<std::sync::mpsc::Sender<f32>>,
     /// Por sesión, el último fin y la última espera ya anunciados con sonido.
     heard: HashMap<String, (f64, f64)>,
 }
@@ -575,6 +624,7 @@ impl Clawd {
             is_passthrough: false,
             last_pos: None,
             height: WINDOW.y,
+            resizer: hyprland_resizer(),
             heard: HashMap::new(),
             paths,
             settings,
@@ -829,6 +879,9 @@ impl Clawd {
         if (wanted - self.height).abs() > 0.5 {
             self.height = wanted;
             ui.ctx().send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(WINDOW.x, wanted)));
+            if let Some(resizer) = &self.resizer {
+                let _ = resizer.send(wanted);
+            }
         }
 
         painter.rect(card, CornerRadius::same(12), CARD, Stroke::new(1.0, BORDER), StrokeKind::Inside);
@@ -979,7 +1032,9 @@ fn main() -> eframe::Result {
         .with_decorations(false)
         .with_transparent(true)
         .with_always_on_top()
-        .with_resizable(false)
+        // En Wayland «no redimensionable» fija el tamaño mínimo y máximo al de
+        // arranque, y el compositor ya no deja crecer la ventana con la tarjeta.
+        .with_resizable(cfg!(target_os = "linux"))
         .with_has_shadow(false)
         .with_taskbar(false);
     if let Some(pos) = start_position(&settings) {
